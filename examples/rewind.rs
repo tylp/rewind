@@ -11,5 +11,6 @@ fn init_log() {
 async fn main() {
     init_log();
 
+    // let _parse = parse("pcap/capture.pcapng");
     let _rewind = rewind("pcap/capture.pcapng");
 }
