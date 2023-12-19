@@ -93,7 +93,7 @@ pub fn rewind(pcap: &str) -> Result<(), Error> {
     let source = ipv4_packet.get_source();
     let destination = ipv4_packet.get_destination();
 
-    // Add the destination to the list of required connections if not present. Excludes local adress
+    // Add the destination to the list of required connections if not present. Excludes local addresses
     add_remote_address(&mut remote_addresses, &local_addresses, source, destination);
 
     // Start time reference
