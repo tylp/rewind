@@ -19,5 +19,14 @@ async fn main() {
 
     info!("Local hosts: {:?}", local_hosts);
     info!("Remote hosts: {:?}", remote_hosts);
-    info!("Packets to replay : {:?}", replay_packets);
+
+    for packet in replay_packets {
+        info!("-- Packet #{}", packet.get_number());
+        info!("time: {:?}", packet.get_time());
+        info!("delay: {:?}", packet.get_delay());
+        info!("source: {:?}", packet.get_local_host());
+        info!("destination: {:?}", packet.get_remote_host());
+        info!("data: {:?}", packet.get_packet_data());
+        info!("status: {:?}", packet.get_status());
+    }
 }

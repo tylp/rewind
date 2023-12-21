@@ -53,6 +53,7 @@ pub struct Host {
 
 #[derive(Debug)]
 pub struct ReplayPacket {
+    number: u64,
     time: Duration,
     delay: Duration,
     source: Host,
@@ -63,6 +64,7 @@ pub struct ReplayPacket {
 
 impl ReplayPacket {
     pub fn new(
+        number: u64,
         time: Duration,
         delay: Duration,
         source: Host,
@@ -71,6 +73,7 @@ impl ReplayPacket {
         status: ReplayPacketStatus,
     ) -> Self {
         ReplayPacket {
+            number,
             time,
             delay,
             source,
@@ -80,7 +83,33 @@ impl ReplayPacket {
         }
     }
 
-    pub fn get_local_host(&self) {}
+    pub fn get_number(&self) -> u64 {
+        self.number
+    }
+
+    pub fn get_time(&self) -> Duration {
+        self.time
+    }
+
+    pub fn get_delay(&self) -> Duration {
+        self.delay
+    }
+
+    pub fn get_local_host(&self) -> &Host {
+        &self.source
+    }
+
+    pub fn get_remote_host(&self) -> &Host {
+        &self.destination
+    }
+
+    pub fn get_packet_data(&self) -> &ReplayPacketData {
+        &self.packet
+    }
+
+    pub fn get_status(&self) -> &ReplayPacketStatus {
+        &self.status
+    }
 }
 
 pub struct Rewinder {
@@ -121,6 +150,7 @@ impl Rewinder {
     // Initialise the replay packets using the pcap
     fn init_pcap(capture: &mut Capture<Offline>) -> Vec<ReplayPacket> {
         let mut tx_packets: Vec<ReplayPacket> = Vec::new();
+        let mut number = 0;
 
         // Loop through each packet
         while let Ok(packet) = capture.next_packet() {
@@ -162,6 +192,7 @@ impl Rewinder {
             };
 
             tx_packets.push(ReplayPacket::new(
+                number,
                 time,
                 delay,
                 Host {
@@ -175,6 +206,8 @@ impl Rewinder {
                 replay_packet_data,
                 ReplayPacketStatus::NotSent,
             ));
+
+            number += 1;
         }
 
         tx_packets
