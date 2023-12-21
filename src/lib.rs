@@ -1,240 +1,245 @@
-use anyhow::{bail, Error, Result};
-use pcap::Capture;
-use pnet::packet::{
-    ethernet::{EtherType, EtherTypes, Ethernet},
-    ip::{IpNextHeaderProtocol, IpNextHeaderProtocols},
-    ipv4::{Ipv4, Ipv4Option},
-    tcp::{Tcp, TcpOption},
-    udp::Udp,
-    Packet,
+use anyhow::{Error, Result};
+use pcap::{Capture, Offline};
+use pnet::{
+    datalink,
+    packet::{
+        ip::{
+            IpNextHeaderProtocol,
+            IpNextHeaderProtocols::{self},
+        },
+        tcp::TcpPacket,
+        udp::UdpPacket,
+        Packet,
+    },
 };
-use pnet_base::MacAddr;
-use std::net::Ipv4Addr;
-use tracing::{debug, error, info, warn};
+use std::{collections::HashSet, net::IpAddr, time::Duration};
 
-/**
-* Rewind the given pcap.
-*
-* A packet is divided into blocks.
-* - The section header block, which defines the begining of a pcap packet.
-* - The InterfaceDescritpionBlock, used to give hw infos
-* - The enhanced/simple packet block, containing layers 2, 3 and 4 data.
-*/
-#[tracing::instrument]
-pub fn rewind(pcap: &str) -> Result<(), Error> {
-    info!("Analyzing {} capture file...", pcap);
-    let mut capture = Capture::from_file(pcap)?;
-    let mut packet_number = 1;
-
-    let packet = capture.next_packet().unwrap();
-    let dissected = dissect_packet(&packet, packet_number);
-
-    // while let Ok(packet) = capture.next_packet() {
-    //     let dissected = dissect_packet(&packet, packet_number);
-
-    //     match dissected {
-    //         Ok(_) => (),
-    //         Err(e) => error!("{}", e),
-    //     }
-
-    //     packet_number += 1;
-    // }
-
-    Ok(())
+#[derive(Debug)]
+pub enum ReplayPacketData {
+    Udp(UdpPacket<'static>),
+    Tcp(TcpPacket<'static>),
 }
 
-fn dissect_packet(packet: &pcap::Packet, num: i32) -> Result<(), Error> {
-    let header = packet.header;
-    let data = packet.data;
-
-    debug!(
-        "----------------------- [{}] New Packet -----------------------",
-        num
-    );
-    debug!("header: {:?}", header);
-    debug!("payload: {:?}", data);
-
-    let i = pnet::packet::ipv4::Ipv4Packet::new(&data[14..]).unwrap();
-
-    info!("{:?}", i);
-
-    let ethernet = get_layer_two(data)?;
-    let l3 = get_layer_three(ethernet, data)?;
-    get_layer_four(l3, data)?;
-
-    debug!("------------------------------------------------------------------\n",);
-
-    Ok(())
+impl ReplayPacketData {
+    /// Converts the given buffer to its corresponding packet type using the given proto.
+    pub fn from_proto(
+        proto: IpNextHeaderProtocol,
+        buffer: Vec<u8>,
+    ) -> Result<ReplayPacketData, &'static str> {
+        match proto {
+            IpNextHeaderProtocols::Tcp => TcpPacket::owned(buffer)
+                .map(ReplayPacketData::Tcp)
+                .ok_or("Invalid TCP packet"),
+            IpNextHeaderProtocols::Udp => UdpPacket::owned(buffer)
+                .map(ReplayPacketData::Udp)
+                .ok_or("Invalid UDP packet"),
+            _ => Err("Unsupported protocol"),
+        }
+    }
 }
 
-/**
- * Analyze the layer two data from the packet.
- */
-fn get_layer_two(data: &[u8]) -> Result<Ethernet, Error> {
-    // Check if data is long enough to contain an Ethernet header
-    if data.len() < 14 {
-        bail!("Layer two lenght ({}) is not long enough", data.len());
-    }
-
-    let dst: MacAddr = MacAddr(data[0], data[1], data[2], data[3], data[4], data[5]);
-    let src: MacAddr = MacAddr(data[6], data[7], data[8], data[9], data[10], data[11]);
-    let etht: EtherType = EtherType(u16::from_be_bytes([data[12], data[13]]));
-
-    // Assuming the rest of the data is payload
-    let pload = if data.len() > 14 {
-        data[14..].to_vec()
-    } else {
-        Vec::new()
-    };
-
-    let eth = Ethernet {
-        destination: dst,
-        source: src,
-        ethertype: etht,
-        payload: pload,
-    };
-
-    debug!("# {:?}", eth);
-
-    Ok(eth)
+#[derive(Debug)]
+pub enum ReplayPacketStatus {
+    Sent,
+    NotSent,
+    Failed,
 }
 
-/**
- * Analyze the layer three data from the packet.
- */
-fn get_layer_three(ethernet: Ethernet, data: &[u8]) -> Result<Ipv4, Error> {
-    let ethertype = ethernet.ethertype;
-
-    if ethertype != EtherTypes::Ipv4 {
-        bail!("Protocol {} is not supported", ethertype);
-    }
-
-    if data.len() < 20 {
-        bail!("Data slice is too short ({}) for IPV4 header", data.len());
-    }
-
-    let version = data[14] >> 4;
-    let ihl = data[14] & 0x0F;
-    let opts: Vec<Ipv4Option> = Vec::new();
-    let mut payload_offset = 0;
-
-    // If ihl > 5, we need to add ihl*32bits as options
-    if ihl > 5 {
-        payload_offset = (ihl * 4) as usize;
-    }
-
-    let ipv4 = Ipv4 {
-        version,
-        header_length: ihl,
-        dscp: data[15] & 0xFC,
-        ecn: data[15] & 0x03,
-        total_length: u16::from_be_bytes([data[16], data[17]]),
-        identification: u16::from_be_bytes([data[18], data[19]]),
-        flags: data[19] & 0xE0,
-        fragment_offset: u16::from_be_bytes([data[20] & 0x1F, data[21]]),
-        ttl: data[22],
-        next_level_protocol: IpNextHeaderProtocol::new(data[23]),
-        checksum: u16::from_be_bytes([data[24], data[25]]),
-        source: Ipv4Addr::new(data[26], data[27], data[28], data[29]),
-        destination: Ipv4Addr::new(data[30], data[31], data[32], data[33]),
-        options: opts,
-        payload: data[payload_offset..].to_vec(),
-    };
-
-    debug!("# {:?}", ipv4);
-
-    Ok(ipv4)
+#[derive(Debug)]
+pub struct Host {
+    addr: IpAddr,
+    port: u16,
 }
 
-/**
- * Analyze the layer four data from the data.
- */
-
-fn get_layer_four(ipv4: Ipv4, data: &[u8]) -> Result<(), Error> {
-    // ethernet headerlen + ipv4 header len
-    let offset = 14 + (ipv4.header_length * 4) as usize;
-    let proto = ipv4.next_level_protocol;
-
-    if offset > data.len() {
-        bail!("Header lenght ({}) > data lenght ({})", offset, data.len());
-    }
-
-    if proto == IpNextHeaderProtocols::Tcp {
-        let _tcp = handle_tcp(offset, data);
-    }
-
-    if proto == IpNextHeaderProtocols::Udp {
-        let _udp = handle_udp(offset, data);
-    }
-
-    Ok(())
+#[derive(Debug)]
+pub struct ReplayPacket {
+    number: u64,
+    time: Duration,
+    delay: Duration,
+    source: Host,
+    destination: Host,
+    packet: ReplayPacketData,
+    status: ReplayPacketStatus,
 }
 
-fn handle_tcp(offset: usize, data: &[u8]) -> Option<Tcp> {
-    let data_offset = data[offset + 12] >> 4;
-    let header_length = (data_offset * 4) as usize; // Total TCP header length in bytes
-
-    // Ensure that the data slice is long enough to contain the full TCP header
-    if data.len() < offset + header_length {
-        return None;
+impl ReplayPacket {
+    pub fn new(
+        number: u64,
+        time: Duration,
+        delay: Duration,
+        source: Host,
+        destination: Host,
+        packet: ReplayPacketData,
+        status: ReplayPacketStatus,
+    ) -> Self {
+        ReplayPacket {
+            number,
+            time,
+            delay,
+            source,
+            destination,
+            packet,
+            status,
+        }
     }
 
-    let mut options = Vec::new();
-    let mut payload = Vec::new();
-
-    if data_offset > 5 {
-        let options_start = offset + 20; // End of the standard TCP header
-        let options_end = offset + header_length;
-        options.extend_from_slice(&data[options_start..options_end]);
+    pub fn get_number(&self) -> u64 {
+        self.number
     }
 
-    // The payload starts right after the TCP header
-    if data.len() > offset + header_length {
-        payload.extend_from_slice(&data[offset + header_length..]);
+    pub fn get_time(&self) -> Duration {
+        self.time
     }
 
-    let opts: Vec<TcpOption> = vec![];
+    pub fn get_delay(&self) -> Duration {
+        self.delay
+    }
 
-    let tcp = Tcp {
-        source: u16::from_be_bytes([data[offset], data[offset + 1]]),
-        destination: u16::from_be_bytes([data[offset + 2], data[offset + 3]]),
-        sequence: u32::from_be_bytes([
-            data[offset + 4],
-            data[offset + 5],
-            data[offset + 6],
-            data[offset + 7],
-        ]),
-        acknowledgement: u32::from_be_bytes([
-            data[offset + 8],
-            data[offset + 9],
-            data[offset + 10],
-            data[offset + 11],
-        ]),
-        data_offset,
-        reserved: data[offset + 12] & 0xF0, // Corrected to mask the reserved bits
-        flags: data[offset + 13],
-        window: u16::from_be_bytes([data[offset + 14], data[offset + 15]]),
-        checksum: u16::from_be_bytes([data[offset + 16], data[offset + 17]]),
-        urgent_ptr: u16::from_be_bytes([data[offset + 18], data[offset + 19]]),
-        options: opts,
-        payload,
-    };
+    pub fn get_local_host(&self) -> &Host {
+        &self.source
+    }
 
-    debug!("# {:?}", tcp);
+    pub fn get_remote_host(&self) -> &Host {
+        &self.destination
+    }
 
-    Some(tcp)
+    pub fn get_packet_data(&self) -> &ReplayPacketData {
+        &self.packet
+    }
+
+    pub fn get_status(&self) -> &ReplayPacketStatus {
+        &self.status
+    }
 }
 
-fn handle_udp(offset: usize, data: &[u8]) -> Option<Udp> {
-    let udp = Udp {
-        source: u16::from_be_bytes([data[offset], data[offset + 1]]),
-        destination: u16::from_be_bytes([data[offset + 3], data[offset + 4]]),
-        length: u16::from_be_bytes([data[offset + 5], data[offset + 6]]),
-        checksum: u16::from_be_bytes([data[offset + 7], data[offset + 8]]),
-        payload: data[offset + 9..].to_vec(),
-    };
+pub struct Rewinder {
+    tx_vec: Vec<ReplayPacket>,
+    remote_hosts: HashSet<IpAddr>,
+    local_hosts: HashSet<IpAddr>,
+}
 
-    debug!("# {:?}", udp);
+impl Rewinder {
+    /// Initialize a handle from the given pcap.
+    /// The operation is blocking while the pcap parsing is not done.
+    pub fn new(file: String) -> Result<Self, Error> {
+        let mut capture = Capture::from_file(file)?;
+        let tx_vec: Vec<ReplayPacket> = Rewinder::init_pcap(&mut capture);
+        let local_hosts: HashSet<IpAddr> = Rewinder::init_local_hosts();
+        let remote_hosts: HashSet<IpAddr> = Rewinder::extract_remote_hosts(&tx_vec, &local_hosts);
 
-    Some(udp)
+        Ok(Rewinder {
+            tx_vec,
+            remote_hosts,
+            local_hosts,
+        })
+    }
+
+    /// Extract every remote host address from the pcap. If an address is already identified
+    /// as a local host it will not include it.
+    fn extract_remote_hosts(
+        packets: &[ReplayPacket],
+        local_hosts: &HashSet<IpAddr>,
+    ) -> HashSet<IpAddr> {
+        packets
+            .iter()
+            .filter(|packet| !local_hosts.contains(&packet.destination.addr))
+            .map(|p| p.destination.addr)
+            .collect()
+    }
+
+    // Initialise the replay packets using the pcap
+    fn init_pcap(capture: &mut Capture<Offline>) -> Vec<ReplayPacket> {
+        let mut tx_packets: Vec<ReplayPacket> = Vec::new();
+        let mut number = 0;
+
+        // Loop through each packet
+        while let Ok(packet) = capture.next_packet() {
+            let ethernet_packet = pnet::packet::ethernet::EthernetPacket::new(packet.data).unwrap();
+
+            // Assume we only do ipv4
+            let ipv4_packet =
+                pnet::packet::ipv4::Ipv4Packet::new(ethernet_packet.payload()).unwrap();
+
+            // Get a copy using .to_vec() since .payload() returns a &[u8] and so using clone would return a &[u8] also.
+            let payload: Vec<u8> = ipv4_packet.payload().to_vec();
+
+            let proto: IpNextHeaderProtocol = ipv4_packet.get_next_level_protocol();
+            let source_ip: IpAddr = IpAddr::V4(ipv4_packet.get_source());
+            let destination_ip: IpAddr = IpAddr::V4(ipv4_packet.get_destination());
+
+            // Start time reference
+            let timestamp = packet.header.ts;
+            let seconds = timestamp.tv_sec as u64;
+            let nanos = (timestamp.tv_usec as u64) * 1000;
+
+            let time = Duration::new(seconds, nanos as u32);
+            let mut delay = Duration::new(0, 0);
+
+            // After the second frame, calculate the delta between the previous frame and the current one
+            if let Some(last_transmission) = tx_packets.last() {
+                let previous_time = last_transmission.time;
+                delay = time - previous_time;
+            }
+
+            let tcp_packet = TcpPacket::owned(ipv4_packet.payload().to_vec()).unwrap();
+            let source_port = tcp_packet.get_source();
+            let destination_port = tcp_packet.get_destination();
+
+            // Generate packet from the payload
+            let replay_packet_data = match ReplayPacketData::from_proto(proto, payload) {
+                Ok(p) => p,
+                Err(_) => todo!(),
+            };
+
+            tx_packets.push(ReplayPacket::new(
+                number,
+                time,
+                delay,
+                Host {
+                    addr: source_ip,
+                    port: source_port,
+                },
+                Host {
+                    addr: destination_ip,
+                    port: destination_port,
+                },
+                replay_packet_data,
+                ReplayPacketStatus::NotSent,
+            ));
+
+            number += 1;
+        }
+
+        tx_packets
+    }
+
+    /// Return the list of remote ip addresses identified in the given capture file
+    pub fn get_remote_hosts(&self) -> HashSet<IpAddr> {
+        self.remote_hosts.clone()
+    }
+
+    pub fn get_local_hosts(&self) -> HashSet<IpAddr> {
+        self.local_hosts.clone()
+    }
+
+    pub fn get_replay_packets(&self) -> &Vec<ReplayPacket> {
+        &self.tx_vec
+    }
+
+    /// Returns the list of local ip addresses
+    fn init_local_hosts() -> HashSet<IpAddr> {
+        datalink::interfaces()
+            .into_iter()
+            .flat_map(|iface| iface.ips)
+            .filter_map(|ip| {
+                if let pnet::ipnetwork::IpNetwork::V4(ip4) = ip {
+                    Some(IpAddr::V4(ip4.ip()))
+                } else if let pnet::ipnetwork::IpNetwork::V6(ip6) = ip {
+                    Some(IpAddr::V6(ip6.ip()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
