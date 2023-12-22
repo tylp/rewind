@@ -11,7 +11,6 @@ fn init_log() {
 async fn main() {
     init_log();
 
-    // let _parse = parse("pcap/capture.pcapng");
     let rewind = Rewinder::new("pcap/single.pcapng".to_string()).unwrap();
     let remote_hosts = rewind.get_remote_hosts();
     let local_hosts = rewind.get_local_hosts();
