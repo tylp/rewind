@@ -38,7 +38,7 @@ impl ReplayPacketData {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ReplayPacketStatus {
     Sent,
     NotSent,
@@ -49,6 +49,16 @@ pub enum ReplayPacketStatus {
 pub struct Host {
     addr: IpAddr,
     port: u16,
+}
+
+impl Host {
+    pub fn get_addr(&self) -> IpAddr {
+        self.addr
+    }
+
+    pub fn get_port(&self) -> u16 {
+        self.port
+    }
 }
 
 #[derive(Debug)]
