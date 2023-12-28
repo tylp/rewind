@@ -2,135 +2,29 @@ use anyhow::{Error, Result};
 use pcap::{Capture, Offline};
 use pnet::{
     datalink,
-    packet::{
-        ip::{
-            IpNextHeaderProtocol,
-            IpNextHeaderProtocols::{self},
-        },
-        tcp::TcpPacket,
-        udp::UdpPacket,
-        Packet,
-    },
+    packet::{ip::IpNextHeaderProtocol, tcp::TcpPacket, Packet as _},
 };
 use std::{collections::HashSet, net::IpAddr, time::Duration};
 
-#[derive(Debug)]
-pub enum ReplayPacketData {
-    Udp(UdpPacket<'static>),
-    Tcp(TcpPacket<'static>),
-}
+pub mod packet;
 
-impl ReplayPacketData {
-    /// Converts the given buffer to its corresponding packet type using the given proto.
-    pub fn from_proto(
-        proto: IpNextHeaderProtocol,
-        buffer: Vec<u8>,
-    ) -> Result<ReplayPacketData, &'static str> {
-        match proto {
-            IpNextHeaderProtocols::Tcp => TcpPacket::owned(buffer)
-                .map(ReplayPacketData::Tcp)
-                .ok_or("Invalid TCP packet"),
-            IpNextHeaderProtocols::Udp => UdpPacket::owned(buffer)
-                .map(ReplayPacketData::Udp)
-                .ok_or("Invalid UDP packet"),
-            _ => Err("Unsupported protocol"),
-        }
-    }
-}
+use packet::{ReplayPacket, ReplayPacketData, ReplayPacketHost, ReplayPacketStatus};
 
-#[derive(Debug, PartialEq)]
-pub enum ReplayPacketStatus {
-    Sent,
-    NotSent,
-    Failed,
-}
-
-#[derive(Debug)]
-pub struct Host {
-    addr: IpAddr,
-    port: u16,
-}
-
-impl Host {
-    pub fn get_addr(&self) -> IpAddr {
-        self.addr
-    }
-
-    pub fn get_port(&self) -> u16 {
-        self.port
-    }
-}
-
-#[derive(Debug)]
-pub struct ReplayPacket {
-    number: u64,
-    time: Duration,
-    delay: Duration,
-    source: Host,
-    destination: Host,
-    packet: ReplayPacketData,
-    status: ReplayPacketStatus,
-}
-
-impl ReplayPacket {
-    pub fn new(
-        number: u64,
-        time: Duration,
-        delay: Duration,
-        source: Host,
-        destination: Host,
-        packet: ReplayPacketData,
-        status: ReplayPacketStatus,
-    ) -> Self {
-        ReplayPacket {
-            number,
-            time,
-            delay,
-            source,
-            destination,
-            packet,
-            status,
-        }
-    }
-
-    pub fn get_number(&self) -> u64 {
-        self.number
-    }
-
-    pub fn get_time(&self) -> Duration {
-        self.time
-    }
-
-    pub fn get_delay(&self) -> Duration {
-        self.delay
-    }
-
-    pub fn get_local_host(&self) -> &Host {
-        &self.source
-    }
-
-    pub fn get_remote_host(&self) -> &Host {
-        &self.destination
-    }
-
-    pub fn get_packet_data(&self) -> &ReplayPacketData {
-        &self.packet
-    }
-
-    pub fn get_status(&self) -> &ReplayPacketStatus {
-        &self.status
-    }
-}
-
+/// The Rewinder struct holds state needed for replaying captured network traffic.
+/// It contains the captured packets, identified local hosts, and identified remote hosts.
 pub struct Rewinder {
     tx_vec: Vec<ReplayPacket>,
     remote_hosts: HashSet<IpAddr>,
     local_hosts: HashSet<IpAddr>,
 }
 
+/// The Rewinder struct implements functionality for replaying captured network traffic.
+/// It contains the captured packets, identified local hosts, and identified remote hosts.
 impl Rewinder {
-    /// Initialize a handle from the given pcap.
-    /// The operation is blocking while the pcap parsing is not done.
+    /// Creates a new Rewinder instance from a pcap file.
+    ///
+    /// Parses the given pcap file to extract packets and identify
+    /// local and remote hosts.
     pub fn new(file: String) -> Result<Self, Error> {
         let mut capture = Capture::from_file(file)?;
         let tx_vec: Vec<ReplayPacket> = Rewinder::init_pcap(&mut capture);
@@ -152,8 +46,8 @@ impl Rewinder {
     ) -> HashSet<IpAddr> {
         packets
             .iter()
-            .filter(|packet| !local_hosts.contains(&packet.destination.addr))
-            .map(|p| p.destination.addr)
+            .filter(|packet| !local_hosts.contains(&packet.get_remote_host().get_addr()))
+            .map(|p| p.get_remote_host().get_addr())
             .collect()
     }
 
@@ -164,10 +58,11 @@ impl Rewinder {
 
         // Loop through each packet
         while let Ok(packet) = capture.next_packet() {
-            let ethernet_packet = pnet::packet::ethernet::EthernetPacket::new(packet.data).unwrap();
+            let ethernet_packet: pnet::packet::ethernet::EthernetPacket<'_> =
+                pnet::packet::ethernet::EthernetPacket::new(packet.data).unwrap();
 
             // Assume we only do ipv4
-            let ipv4_packet =
+            let ipv4_packet: pnet::packet::ipv4::Ipv4Packet<'_> =
                 pnet::packet::ipv4::Ipv4Packet::new(ethernet_packet.payload()).unwrap();
 
             // Get a copy using .to_vec() since .payload() returns a &[u8] and so using clone would return a &[u8] also.
@@ -187,7 +82,7 @@ impl Rewinder {
 
             // After the second frame, calculate the delta between the previous frame and the current one
             if let Some(last_transmission) = tx_packets.last() {
-                let previous_time = last_transmission.time;
+                let previous_time = last_transmission.get_time();
                 delay = time - previous_time;
             }
 
@@ -205,14 +100,8 @@ impl Rewinder {
                 number,
                 time,
                 delay,
-                Host {
-                    addr: source_ip,
-                    port: source_port,
-                },
-                Host {
-                    addr: destination_ip,
-                    port: destination_port,
-                },
+                ReplayPacketHost::new(source_ip, source_port),
+                ReplayPacketHost::new(destination_ip, destination_port),
                 replay_packet_data,
                 ReplayPacketStatus::NotSent,
             ));
@@ -228,10 +117,13 @@ impl Rewinder {
         self.remote_hosts.clone()
     }
 
+    /// Returns the list of local ip addresses identified on the local netowrk interfaces
     pub fn get_local_hosts(&self) -> HashSet<IpAddr> {
         self.local_hosts.clone()
     }
 
+    /// Returns a reference to the internal vector containing
+    /// the replay packets generated from the pcap file.
     pub fn get_replay_packets(&self) -> &Vec<ReplayPacket> {
         &self.tx_vec
     }
