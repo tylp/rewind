@@ -4,7 +4,8 @@ use std::{
     time::Duration,
 };
 
-use rewind::{ReplayPacketStatus, Rewinder};
+use rewind::packet::ReplayPacketStatus;
+use rewind::Rewinder;
 
 #[test]
 /// Test the init phase using a simple pcap file that only contains one packet.

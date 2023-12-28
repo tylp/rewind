@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use rewind::Rewinder;
 use tracing::{info, Level};
 
@@ -11,7 +13,14 @@ fn init_log() {
 async fn main() {
     init_log();
 
-    let rewind = Rewinder::new("pcap/single.pcapng".to_string()).unwrap();
+    // Import the .pcapng file into the env
+    let pcap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("pcap/single.pcapng")
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let rewind = Rewinder::new(pcap_path).unwrap();
     let remote_hosts = rewind.get_remote_hosts();
     let local_hosts = rewind.get_local_hosts();
     let replay_packets = rewind.get_replay_packets();
