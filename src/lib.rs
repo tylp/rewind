@@ -25,9 +25,9 @@ impl Rewinder {
     ///
     /// Parses the given pcap file to extract packets and identify
     /// local and remote hosts.
-    pub fn new(file: String) -> Result<Self, Error> {
+    pub async fn new(file: String) -> Result<Self, Error> {
         let mut capture = Capture::from_file(file)?;
-        let tx_vec: Vec<ReplayPacket> = Rewinder::init_pcap(&mut capture);
+        let tx_vec: Vec<ReplayPacket> = Rewinder::init_pcap(&mut capture).await;
         let local_hosts: HashSet<IpAddr> = Rewinder::init_local_hosts();
         let remote_hosts: HashSet<IpAddr> = Rewinder::extract_remote_hosts(&tx_vec, &local_hosts);
 
@@ -52,7 +52,7 @@ impl Rewinder {
     }
 
     // Initialise the replay packets using the pcap
-    fn init_pcap(capture: &mut Capture<Offline>) -> Vec<ReplayPacket> {
+    async fn init_pcap(capture: &mut Capture<Offline>) -> Vec<ReplayPacket> {
         let mut tx_packets: Vec<ReplayPacket> = Vec::new();
         let mut number = 0;
 

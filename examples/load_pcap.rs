@@ -20,7 +20,7 @@ async fn main() {
         .unwrap()
         .to_string();
 
-    let rewind = Rewinder::new(pcap_path).unwrap();
+    let rewind = Rewinder::new(pcap_path).await.unwrap();
     let remote_hosts = rewind.get_remote_hosts();
     let local_hosts = rewind.get_local_hosts();
     let replay_packets = rewind.get_replay_packets();
