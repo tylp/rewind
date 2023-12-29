@@ -7,10 +7,12 @@ use std::{
 use rewind::packet::ReplayPacketStatus;
 use rewind::Rewinder;
 
-#[test]
+#[tokio::test]
 /// Test the init phase using a simple pcap file that only contains one packet.
-pub fn load_pcap_file_test() {
-    let rewind = Rewinder::new("pcap/single.pcapng".to_string()).unwrap();
+pub async fn load_pcap_file_test() {
+    let rewind = Rewinder::new("pcap/single.pcapng".to_string())
+        .await
+        .unwrap();
     let remote_hosts = rewind.get_remote_hosts();
     let replay_packets = rewind.get_replay_packets().first().unwrap();
 
